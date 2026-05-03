@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, Eraser, Play, Power, RotateCcw, SquareTerminal, Zap } from "lucide-react";
+import { Copy, Eraser, Pause, Play, Power, RotateCcw, SquareTerminal, Zap } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type { Project, TerminalServerMessage, TerminalSession } from "@codex-ui/shared";
@@ -15,6 +15,7 @@ type Props = {
 
 const terminalSafeCols = 1;
 const terminalSafeRows = 1;
+const pausedOutputLimit = 600_000;
 
 export function TerminalView({ connection, project, session, onSessionUpdate }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -24,9 +25,15 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
   const outputQueueRef = useRef("");
   const writeFrameRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const pausedBytesUpdateTimerRef = useRef<number | null>(null);
+  const outputPausedRef = useRef(false);
+  const pausedOutputRef = useRef("");
+  const flushPausedOutputRef = useRef<() => void>(() => undefined);
   const lastSizeRef = useRef({ cols: 0, rows: 0 });
   const [status, setStatus] = useState(session.status === "exited" ? "已退出" : "连接中");
   const [statusKind, setStatusKind] = useState(session.status === "exited" ? "exited" : "connecting");
+  const [isOutputPaused, setIsOutputPaused] = useState(false);
+  const [pausedBytes, setPausedBytes] = useState(0);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
@@ -118,6 +125,11 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       try {
         message = JSON.parse(raw) as TerminalServerMessage;
       } catch {
+        if (outputPausedRef.current) {
+          appendPausedOutput(`${raw}\r\n`);
+          return;
+        }
+
         const scrollAnchor = captureScrollAnchor();
         terminal.writeln(raw);
         restoreScrollAnchor(scrollAnchor);
@@ -131,24 +143,24 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
         queueTerminalWrite(message.data);
       } else if (message.type === "exit") {
         flushTerminalWrite();
-        const scrollAnchor = captureScrollAnchor();
-        terminal.writeln("");
-        terminal.writeln(`[进程已退出 ${message.code ?? message.signal ?? ""}]`);
-        restoreScrollAnchor(scrollAnchor);
+        writeTerminalLine(`\r\n[进程已退出 ${message.code ?? message.signal ?? ""}]`);
         setStatus("已退出");
         setStatusKind("exited");
         onSessionUpdate();
       } else if (message.type === "error") {
         flushTerminalWrite();
-        const scrollAnchor = captureScrollAnchor();
-        terminal.writeln(message.message);
-        restoreScrollAnchor(scrollAnchor);
+        writeTerminalLine(message.message);
         setStatus("错误");
         setStatusKind("error");
       }
     }
 
     function queueTerminalWrite(data: string) {
+      if (outputPausedRef.current) {
+        appendPausedOutput(data);
+        return;
+      }
+
       outputQueueRef.current += data;
 
       if (writeFrameRef.current === null) {
@@ -160,6 +172,12 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       writeFrameRef.current = null;
 
       if (!outputQueueRef.current) {
+        return;
+      }
+
+      if (outputPausedRef.current) {
+        appendPausedOutput(outputQueueRef.current);
+        outputQueueRef.current = "";
         return;
       }
 
@@ -216,6 +234,33 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       }
     }
 
+    function writeTerminalLine(data: string) {
+      if (outputPausedRef.current) {
+        appendPausedOutput(`${data}\r\n`);
+        return;
+      }
+
+      const scrollAnchor = captureScrollAnchor();
+      terminal.writeln(data);
+      restoreScrollAnchor(scrollAnchor);
+    }
+
+    function appendPausedOutput(data: string) {
+      pausedOutputRef.current = trimPausedOutput(pausedOutputRef.current + data);
+      schedulePausedBytesUpdate();
+    }
+
+    function schedulePausedBytesUpdate() {
+      if (pausedBytesUpdateTimerRef.current !== null) {
+        return;
+      }
+
+      pausedBytesUpdateTimerRef.current = window.setTimeout(() => {
+        pausedBytesUpdateTimerRef.current = null;
+        setPausedBytes(pausedOutputRef.current.length);
+      }, 250);
+    }
+
     function captureScrollAnchor() {
       const buffer = terminal.buffer.active;
 
@@ -233,18 +278,35 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       }
     }
 
+    flushPausedOutputRef.current = () => {
+      if (!pausedOutputRef.current) {
+        setPausedBytes(0);
+        return;
+      }
+
+      const data = pausedOutputRef.current;
+      pausedOutputRef.current = "";
+      setPausedBytes(0);
+      terminal.write(data, () => terminal.scrollToBottom());
+    };
+
     return () => {
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      flushPausedOutputRef.current = () => undefined;
       if (writeFrameRef.current !== null) {
         window.cancelAnimationFrame(writeFrameRef.current);
       }
       if (resizeFrameRef.current !== null) {
         window.cancelAnimationFrame(resizeFrameRef.current);
       }
+      if (pausedBytesUpdateTimerRef.current !== null) {
+        window.clearTimeout(pausedBytesUpdateTimerRef.current);
+      }
       outputQueueRef.current = "";
       writeFrameRef.current = null;
       resizeFrameRef.current = null;
+      pausedBytesUpdateTimerRef.current = null;
       socket.close();
       terminal.dispose();
       terminalRef.current = null;
@@ -258,6 +320,17 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(encodeTerminalMessage(message));
+    }
+  }
+
+  function toggleOutputPaused() {
+    const next = !outputPausedRef.current;
+    outputPausedRef.current = next;
+    setIsOutputPaused(next);
+
+    if (!next) {
+      flushPausedOutputRef.current();
+      terminalRef.current?.focus();
     }
   }
 
@@ -286,6 +359,15 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
         </div>
         <div className="toolbar-actions">
           <span className={`terminal-status ${statusKind}`}>{status}</span>
+          {isOutputPaused ? <span className="terminal-paused-badge">已暂停 {formatBytes(pausedBytes)}</span> : null}
+          <button
+            className={`icon-button ${isOutputPaused ? "selected" : ""}`}
+            type="button"
+            title={isOutputPaused ? "继续显示输出" : "暂停显示输出"}
+            onClick={toggleOutputPaused}
+          >
+            {isOutputPaused ? <Play size={18} /> : <Pause size={18} />}
+          </button>
           <button className="icon-button" type="button" title="复制选中内容" onClick={copySelection}>
             <Copy size={18} />
           </button>
@@ -327,4 +409,16 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 function shortShellName(shell: string): string {
   const name = shell.split(/[\\/]/).pop();
   return name || shell;
+}
+
+function trimPausedOutput(value: string): string {
+  return value.length > pausedOutputLimit ? value.slice(value.length - pausedOutputLimit) : value;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value}B`;
+  }
+
+  return `${Math.ceil(value / 1024)}KB`;
 }

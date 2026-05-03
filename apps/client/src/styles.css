@@ -279,6 +279,12 @@ button {
   background: #f6f9fd;
 }
 
+.icon-button.selected {
+  color: #1473e6;
+  border-color: #1473e6;
+  background: #eef6ff;
+}
+
 .danger {
   color: #b42318;
 }
@@ -559,6 +565,20 @@ button:disabled {
 .terminal-status.error {
   color: #b42318;
   background: #fde8e7;
+}
+
+.terminal-paused-badge {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #f3cf7a;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  color: #7a5200;
+  background: #fff6dc;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .terminal-frame {
