@@ -8,10 +8,20 @@ import {
   type ApiError,
   type AuthLoginRequest,
   type AuthSetupRequest,
+  type CreateCodexTaskRequest,
   type CreateTerminalSessionRequest,
-  type SaveMarkdownFileRequest
+  type SaveMarkdownFileRequest,
+  type UploadCodexAttachmentRequest
 } from "@codex-ui/shared";
 import { authMiddleware, verifyWsToken } from "./auth.js";
+import {
+  attachCodexTask,
+  cancelCodexTask,
+  createCodexTask,
+  getCodexTask,
+  listCodexTasks,
+  saveCodexAttachment
+} from "./codexTasks.js";
 import { loadConfig } from "./config.js";
 import { asyncRoute, requestServerUrl } from "./http.js";
 import { listProjectFiles, readProjectMarkdown, writeProjectMarkdown } from "./projectFiles.js";
@@ -42,6 +52,17 @@ const markdownSaveSchema = z.object({
   content: z.string()
 });
 
+const codexAttachmentSchema = z.object({
+  name: z.string().min(1, "附件名称不能为空。"),
+  mimeType: z.string().optional().default("application/octet-stream"),
+  data: z.string().min(1, "附件内容不能为空。")
+});
+
+const codexTaskCreateSchema = z.object({
+  prompt: z.string().min(1, "任务内容不能为空。"),
+  attachmentIds: z.array(z.string()).optional()
+});
+
 const terminalCreateSchema = z.object({
   title: z.string().optional()
 });
@@ -52,7 +73,7 @@ await store.init();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "3mb" }));
+app.use(express.json({ limit: "18mb" }));
 
 app.get("/health", (_request, response) => {
   response.json({ ok: true });
@@ -211,6 +232,93 @@ app.put(
   })
 );
 
+app.post(
+  "/api/projects/:id/codex/attachments",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const body = codexAttachmentSchema.parse(request.body) satisfies UploadCodexAttachmentRequest;
+    response.status(201).json(await saveCodexAttachment(project, config, body));
+  })
+);
+
+app.get(
+  "/api/projects/:id/codex/tasks",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    response.json(listCodexTasks(project.id));
+  })
+);
+
+app.get(
+  "/api/projects/:id/codex/tasks/:taskId",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const task = getCodexTask(project.id, paramValue(request.params.taskId));
+
+    if (!task) {
+      response.status(404).json({ error: "Codex 任务不存在。" });
+      return;
+    }
+
+    response.json(task);
+  })
+);
+
+app.post(
+  "/api/projects/:id/codex/tasks",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const body = codexTaskCreateSchema.parse(request.body) satisfies CreateCodexTaskRequest;
+    await store.touchProject(project.id);
+    response.status(201).json(await createCodexTask(project, config, body));
+  })
+);
+
+app.delete(
+  "/api/projects/:id/codex/tasks/:taskId",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const cancelled = cancelCodexTask(project.id, paramValue(request.params.taskId));
+
+    if (!cancelled) {
+      response.status(404).json({ error: "Codex 任务不存在。" });
+      return;
+    }
+
+    response.status(204).end();
+  })
+);
+
 app.get(
   "/api/projects/:id/terminals",
   asyncRoute(async (request, response) => {
@@ -277,7 +385,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", async (request, socket, head) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
 
-  if (url.pathname !== "/ws/terminal") {
+  if (url.pathname !== "/ws/terminal" && url.pathname !== "/ws/codex") {
     socket.destroy();
     return;
   }
@@ -285,6 +393,7 @@ server.on("upgrade", async (request, socket, head) => {
   const token = url.searchParams.get("token");
   const projectId = url.searchParams.get("projectId");
   const terminalId = url.searchParams.get("terminalId") ?? undefined;
+  const taskId = url.searchParams.get("taskId") ?? undefined;
 
   if (!(await verifyWsToken(store, token, config.authDisabled)) || !projectId) {
     socket.destroy();
@@ -300,6 +409,16 @@ server.on("upgrade", async (request, socket, head) => {
 
   await store.touchProject(projectId);
   wss.handleUpgrade(request, socket, head, (websocket) => {
+    if (url.pathname === "/ws/codex") {
+      if (!taskId) {
+        websocket.close();
+        return;
+      }
+
+      attachCodexTask(websocket, project, taskId);
+      return;
+    }
+
     attachTerminal(websocket, project, config, terminalId).catch((error: unknown) => {
       websocket.send(
         JSON.stringify({

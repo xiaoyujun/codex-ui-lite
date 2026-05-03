@@ -1,13 +1,17 @@
 import type {
   AuthLoginResponse,
   AuthStatus,
+  CodexAttachment,
+  CodexTask,
   CreateProjectRequest,
+  CreateCodexTaskRequest,
   Project,
   ProjectFileList,
   ProjectMarkdownFile,
   SaveMarkdownFileRequest,
   TerminalClientMessage,
   TerminalSession,
+  UploadCodexAttachmentRequest,
   UpdateProjectRequest
 } from "@codex-ui/shared";
 import type { Connection } from "./types.js";
@@ -110,12 +114,54 @@ export async function closeProjectTerminal(connection: Connection, projectId: st
   });
 }
 
+export async function uploadCodexAttachment(
+  connection: Connection,
+  projectId: string,
+  input: UploadCodexAttachmentRequest
+): Promise<CodexAttachment> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/attachments`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function listCodexTasks(connection: Connection, projectId: string): Promise<CodexTask[]> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks`);
+}
+
+export async function createCodexTask(
+  connection: Connection,
+  projectId: string,
+  input: CreateCodexTaskRequest
+): Promise<CodexTask> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function cancelCodexTask(connection: Connection, projectId: string, taskId: string): Promise<void> {
+  await request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks/${encodeURIComponent(taskId)}`, {
+    method: "DELETE"
+  });
+}
+
 export function terminalUrl(connection: Connection, projectId: string, terminalId: string): string {
   const base = normalizeUrl(connection.serverUrl);
   const url = new URL("/ws/terminal", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("projectId", projectId);
   url.searchParams.set("terminalId", terminalId);
+  url.searchParams.set("token", connection.token);
+  return url.toString();
+}
+
+export function codexTaskUrl(connection: Connection, projectId: string, taskId: string): string {
+  const base = normalizeUrl(connection.serverUrl);
+  const url = new URL("/ws/codex", base);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("projectId", projectId);
+  url.searchParams.set("taskId", taskId);
   url.searchParams.set("token", connection.token);
   return url.toString();
 }

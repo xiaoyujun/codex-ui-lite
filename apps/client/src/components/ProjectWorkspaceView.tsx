@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, FileText, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
+import { ArrowLeft, Bot, FileText, Plus, RefreshCw, SquareTerminal, Trash2 } from "lucide-react";
 import type { Project, TerminalSession } from "@codex-ui/shared";
 import type { Connection, WorkspaceSnapshot } from "../types.js";
 import { closeProjectTerminal, createProjectTerminal, listProjectTerminals } from "../api.js";
+import { CodexTaskView } from "./CodexTaskView.js";
 import { FileView } from "./FileView.js";
 import { TerminalView } from "./TerminalView.js";
 
@@ -15,7 +16,7 @@ type Props = {
 };
 
 export function ProjectWorkspaceView({ connection, project, activeTerminalId, onBack, onSnapshotChange }: Props) {
-  const [mode, setMode] = useState<"terminals" | "files">("terminals");
+  const [mode, setMode] = useState<"codex" | "terminals" | "files">("codex");
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [selectedId, setSelectedId] = useState(activeTerminalId);
   const [busy, setBusy] = useState(false);
@@ -59,8 +60,14 @@ export function ProjectWorkspaceView({ connection, project, activeTerminalId, on
   );
 
   useEffect(() => {
-    refreshSessions(true, activeTerminalId);
+    refreshSessions(false, activeTerminalId);
   }, [connection.serverUrl, connection.token, project.id]);
+
+  useEffect(() => {
+    if (mode === "terminals" && sessions.length === 0 && !busy) {
+      refreshSessions(true, activeTerminalId);
+    }
+  }, [mode]);
 
   async function createTerminal() {
     setBusy(true);
@@ -128,6 +135,22 @@ export function ProjectWorkspaceView({ connection, project, activeTerminalId, on
             <FileText size={17} />
             <span>查看文件夹</span>
           </button>
+          <button
+            className={`secondary-button compact-button ${mode === "codex" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("codex")}
+          >
+            <Bot size={17} />
+            <span>Codex 页面</span>
+          </button>
+          <button
+            className={`secondary-button compact-button ${mode === "terminals" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("terminals")}
+          >
+            <SquareTerminal size={17} />
+            <span>打开终端</span>
+          </button>
           <button className="icon-button" type="button" title="刷新终端窗口" onClick={() => refreshSessions(false)} disabled={busy}>
             <RefreshCw size={18} />
           </button>
@@ -140,8 +163,10 @@ export function ProjectWorkspaceView({ connection, project, activeTerminalId, on
 
       {error ? <p className="error-text">{error}</p> : null}
 
-      {mode === "files" ? (
-        <FileView connection={connection} project={project} onBack={() => setMode("terminals")} />
+      {mode === "codex" ? (
+        <CodexTaskView connection={connection} project={project} />
+      ) : mode === "files" ? (
+        <FileView connection={connection} project={project} onBack={() => setMode("codex")} />
       ) : (
         <div className="terminal-workspace">
           <div className="terminal-tabs" role="tablist" aria-label="终端窗口">

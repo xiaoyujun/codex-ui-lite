@@ -62,6 +62,53 @@ export type CreateTerminalSessionRequest = {
   title?: string;
 };
 
+export type CodexAttachmentKind = "image" | "file";
+
+export type CodexAttachment = {
+  id: string;
+  projectId: string;
+  name: string;
+  path: string;
+  mimeType: string;
+  size: number;
+  kind: CodexAttachmentKind;
+  createdAt: string;
+};
+
+export type UploadCodexAttachmentRequest = {
+  name: string;
+  mimeType: string;
+  data: string;
+};
+
+export type CodexTaskStatus = "running" | "completed" | "failed" | "cancelled";
+
+export type CodexTask = {
+  id: string;
+  projectId: string;
+  prompt: string;
+  attachments: CodexAttachment[];
+  status: CodexTaskStatus;
+  finalMessage?: string;
+  logTail: string;
+  error?: string;
+  exitCode?: number;
+  signal?: number | string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCodexTaskRequest = {
+  prompt: string;
+  attachmentIds?: string[];
+};
+
+export type CodexTaskServerMessage =
+  | { type: "snapshot"; task: CodexTask }
+  | { type: "log"; taskId: string; stream: "stdout" | "stderr"; data: string }
+  | { type: "done"; task: CodexTask }
+  | { type: "error"; message: string };
+
 export type AuthStatus = {
   setupRequired: boolean;
 };
