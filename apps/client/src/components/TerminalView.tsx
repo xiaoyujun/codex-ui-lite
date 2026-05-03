@@ -13,6 +13,9 @@ type Props = {
   onSessionUpdate(): void;
 };
 
+const terminalSafeCols = 1;
+const terminalSafeRows = 1;
+
 export function TerminalView({ connection, project, session, onSessionUpdate }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -41,7 +44,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       cursorStyle: "bar",
       fontFamily: "Cascadia Mono, JetBrains Mono, Consolas, monospace",
       fontSize: 14,
-      lineHeight: 1.2,
+      lineHeight: 1.3,
       scrollback: 8000,
       fastScrollModifier: "alt",
       fastScrollSensitivity: 5,
@@ -180,11 +183,20 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     function fitTerminal() {
       try {
         const scrollAnchor = captureScrollAnchor();
-        fit.fit();
-        const nextSize = { cols: terminal.cols, rows: terminal.rows };
+        const dimensions = fit.proposeDimensions();
+
+        if (!dimensions) {
+          return;
+        }
+
+        const nextSize = {
+          cols: Math.max(20, dimensions.cols - terminalSafeCols),
+          rows: Math.max(6, dimensions.rows - terminalSafeRows)
+        };
 
         if (lastSizeRef.current.cols !== nextSize.cols || lastSizeRef.current.rows !== nextSize.rows) {
           lastSizeRef.current = nextSize;
+          terminal.resize(nextSize.cols, nextSize.rows);
           send({
             type: "resize",
             cols: nextSize.cols,
