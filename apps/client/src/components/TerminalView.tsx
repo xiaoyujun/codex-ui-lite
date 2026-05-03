@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type { Project, TerminalServerMessage, TerminalSession } from "@codex-ui/shared";
 import type { Connection } from "../types.js";
-import { encodeTerminalMessage, terminalUrl } from "../api.js";
+import { encodeTerminalMessage, terminalUrl, websocketProtocols } from "../api.js";
 
 type Props = {
   connection: Connection;
@@ -81,7 +81,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       }
     });
     const fit = new FitAddon();
-    const socket = new WebSocket(terminalUrl(connection, project.id, session.id));
+    const socket = new WebSocket(terminalUrl(connection, project.id, session.id), websocketProtocols(connection));
 
     terminalRef.current = terminal;
     fitRef.current = fit;

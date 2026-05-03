@@ -7,10 +7,12 @@ const workspaceKey = "codex-ui-lite.workspace.v1";
 
 export async function loadConnection(): Promise<Connection | undefined> {
   const stored = await Preferences.get({ key: connectionKey });
-  const raw = stored.value ?? localStorage.getItem(connectionKey);
+  const legacyRaw = localStorage.getItem(connectionKey);
+  const raw = stored.value ?? legacyRaw;
 
   if (!raw) {
     localStorage.removeItem(legacyConnectionKey);
+    localStorage.removeItem(connectionKey);
     await Preferences.remove({ key: legacyConnectionKey });
     return undefined;
   }
@@ -18,22 +20,29 @@ export async function loadConnection(): Promise<Connection | undefined> {
   try {
     const parsed = JSON.parse(raw) as Partial<Connection>;
     if (parsed.serverUrl && parsed.token) {
-      return {
+      const connection = {
         serverUrl: parsed.serverUrl,
         token: parsed.token,
         username: typeof parsed.username === "string" ? parsed.username : undefined
       };
+      if (!stored.value && legacyRaw) {
+        await Preferences.set({ key: connectionKey, value: legacyRaw });
+      }
+      localStorage.removeItem(connectionKey);
+      return connection;
     }
   } catch {
+    localStorage.removeItem(connectionKey);
     return undefined;
   }
 
+  localStorage.removeItem(connectionKey);
   return undefined;
 }
 
 export async function saveConnection(connection: Connection): Promise<void> {
   const value = JSON.stringify(connection);
-  localStorage.setItem(connectionKey, value);
+  localStorage.removeItem(connectionKey);
   await Preferences.set({ key: connectionKey, value });
 }
 
@@ -46,7 +55,8 @@ export async function clearConnection(): Promise<void> {
 
 export async function loadWorkspaceSnapshot(): Promise<WorkspaceSnapshot | undefined> {
   const stored = await Preferences.get({ key: workspaceKey });
-  const raw = stored.value ?? localStorage.getItem(workspaceKey);
+  const legacyRaw = localStorage.getItem(workspaceKey);
+  const raw = stored.value ?? legacyRaw;
 
   if (!raw) {
     return undefined;
@@ -54,15 +64,25 @@ export async function loadWorkspaceSnapshot(): Promise<WorkspaceSnapshot | undef
 
   try {
     const parsed = JSON.parse(raw) as WorkspaceSnapshot;
-    return parsed.project?.id ? parsed : undefined;
+    if (parsed.project?.id) {
+      if (!stored.value && legacyRaw) {
+        await Preferences.set({ key: workspaceKey, value: legacyRaw });
+      }
+      localStorage.removeItem(workspaceKey);
+      return parsed;
+    }
   } catch {
+    localStorage.removeItem(workspaceKey);
     return undefined;
   }
+
+  localStorage.removeItem(workspaceKey);
+  return undefined;
 }
 
 export async function saveWorkspaceSnapshot(snapshot: WorkspaceSnapshot): Promise<void> {
   const value = JSON.stringify(snapshot);
-  localStorage.setItem(workspaceKey, value);
+  localStorage.removeItem(workspaceKey);
   await Preferences.set({ key: workspaceKey, value });
 }
 

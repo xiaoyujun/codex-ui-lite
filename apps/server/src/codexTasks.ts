@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import type {
   CodexAttachment,
@@ -203,12 +203,22 @@ export function attachCodexWindow(socket: WebSocket, project: Project, windowId:
 }
 
 function startCodex(project: Project, config: ServerConfig, window: CodexWindowRuntime, task: CodexTaskRuntime): void {
-  const args = buildCodexArgs(project, task);
-  const child = spawn(config.codexCommand, args, {
-    cwd: project.path,
-    env: process.env,
-    shell: true
-  });
+  let child: ChildProcessWithoutNullStreams;
+
+  try {
+    const command = buildCodexCommand(config, project, task);
+    child = spawn(command.file, command.args, {
+      cwd: project.path,
+      env: process.env,
+      shell: false,
+      windowsHide: true
+    });
+  } catch (error) {
+    finishTask(window, task, "failed", undefined, undefined, error instanceof Error ? error.message : String(error)).catch(
+      () => undefined
+    );
+    return;
+  }
 
   task.process = child;
   child.stdin.end(buildPrompt(task));
@@ -264,6 +274,136 @@ function buildCodexArgs(project: Project, task: CodexTaskRuntime): string[] {
   }
 
   return args;
+}
+
+function buildCodexCommand(
+  config: ServerConfig,
+  project: Project,
+  task: CodexTaskRuntime
+): { file: string; args: string[] } {
+  const commandParts = splitCommandLine(config.codexCommand);
+  const commandFile = commandParts[0] ?? "codex";
+  const commandArgs = commandParts.slice(1);
+  const codexArgs = buildCodexArgs(project, task);
+  const windowsNodeEntry = process.platform === "win32" ? resolveWindowsNodeEntry(commandFile) : undefined;
+
+  if (windowsNodeEntry) {
+    return {
+      file: process.execPath,
+      args: [windowsNodeEntry, ...commandArgs, ...codexArgs]
+    };
+  }
+
+  return {
+    file: commandFile,
+    args: [...commandArgs, ...codexArgs]
+  };
+}
+
+function splitCommandLine(value: string): string[] {
+  const input = value.trim();
+  const parts: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote) {
+    throw new Error("CODEX_COMMAND contains an unterminated quote.");
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+function resolveWindowsNodeEntry(commandFile: string): string | undefined {
+  const resolved = resolveWindowsCommandPath(commandFile);
+
+  if (!resolved) {
+    return undefined;
+  }
+
+  if (/\.[cm]?js$/i.test(resolved)) {
+    return resolved;
+  }
+
+  if (!/\.cmd$/i.test(resolved)) {
+    return undefined;
+  }
+
+  const contents = readFileSync(resolved, "utf8");
+  const match = /"%dp0%[\\/]*([^"]+?\.js)"/i.exec(contents);
+
+  if (!match) {
+    throw new Error(
+      "CODEX_COMMAND resolved to a Windows .cmd file that cannot be launched safely. Point CODEX_COMMAND to an .exe or the underlying Node.js entry file."
+    );
+  }
+
+  const scriptPath = path.resolve(path.dirname(resolved), match[1].replace(/^[\\/]+/, ""));
+
+  if (!existsSync(scriptPath)) {
+    throw new Error(`CODEX_COMMAND Windows shim points to a missing Node.js entry file: ${scriptPath}`);
+  }
+
+  return scriptPath;
+}
+
+function resolveWindowsCommandPath(commandFile: string): string | undefined {
+  const hasDirectory = commandFile.includes("/") || commandFile.includes("\\");
+  const extension = path.extname(commandFile);
+  const candidates = extension
+    ? [commandFile]
+    : (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+        .split(";")
+        .filter(Boolean)
+        .map((item) => `${commandFile}${item.toLowerCase()}`);
+
+  if (hasDirectory) {
+    return candidates.find((candidate) => existsSync(candidate));
+  }
+
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!directory) {
+      continue;
+    }
+
+    const found = candidates.map((candidate) => path.join(directory, candidate)).find((candidate) => existsSync(candidate));
+    if (found) {
+      return found;
+    }
+  }
+
+  return undefined;
 }
 
 function buildPrompt(task: CodexTaskRuntime): string {

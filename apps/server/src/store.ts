@@ -43,6 +43,8 @@ const emptyData = (): StoredData => ({
 export class JsonStore {
   private readonly filePath: string;
   private readonly codexGlobalStatePath: string;
+  private dataMutationQueue: Promise<void> = Promise.resolve();
+  private codexStateMutationQueue: Promise<void> = Promise.resolve();
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, "codex-ui-lite.json");
@@ -77,18 +79,20 @@ export class JsonStore {
     const projectPath = await resolveProjectPath(input.path);
     const now = new Date().toISOString();
     const name = normalizeProjectName(input.name);
+    let metadata: ProjectMetadata = {};
 
-    const data = await this.read();
-    data.projectMetadata[projectPath] = {
-      ...data.projectMetadata[projectPath],
-      defaultShell: normalizeOptional(input.defaultShell),
-      createdAt: data.projectMetadata[projectPath]?.createdAt ?? now,
-      lastOpenedAt: now
-    };
-    await this.write(data);
+    await this.mutateData((data) => {
+      metadata = {
+        ...data.projectMetadata[projectPath],
+        defaultShell: normalizeOptional(input.defaultShell),
+        createdAt: data.projectMetadata[projectPath]?.createdAt ?? now,
+        lastOpenedAt: now
+      };
+      data.projectMetadata[projectPath] = metadata;
+    });
     await this.upsertWorkspaceRoot(projectPath, { label: name, activate: true });
 
-    return this.toProject(projectPath, name, data.projectMetadata[projectPath]);
+    return this.toProject(projectPath, name, metadata);
   }
 
   async updateProject(id: string, input: UpdateProjectRequest): Promise<Project | undefined> {
@@ -99,22 +103,24 @@ export class JsonStore {
 
     const nextPath = input.path === undefined ? existing.path : await resolveProjectPath(input.path);
     const nextName = input.name === undefined ? existing.name : normalizeProjectName(input.name);
-    const data = await this.read();
-    const existingMeta = data.projectMetadata[existing.path] ?? {};
-    const nextMeta: ProjectMetadata = {
-      ...existingMeta,
-      defaultShell:
-        input.defaultShell === undefined ? existingMeta.defaultShell : normalizeOptional(input.defaultShell),
-      createdAt: existingMeta.createdAt ?? existing.createdAt,
-      lastOpenedAt: new Date().toISOString()
-    };
+    let nextMeta: ProjectMetadata = {};
 
-    if (nextPath !== existing.path) {
-      delete data.projectMetadata[existing.path];
-    }
+    await this.mutateData((data) => {
+      const currentMeta = data.projectMetadata[existing.path] ?? {};
+      nextMeta = {
+        ...currentMeta,
+        defaultShell:
+          input.defaultShell === undefined ? currentMeta.defaultShell : normalizeOptional(input.defaultShell),
+        createdAt: currentMeta.createdAt ?? existing.createdAt,
+        lastOpenedAt: new Date().toISOString()
+      };
 
-    data.projectMetadata[nextPath] = nextMeta;
-    await this.write(data);
+      if (nextPath !== existing.path) {
+        delete data.projectMetadata[existing.path];
+      }
+
+      data.projectMetadata[nextPath] = nextMeta;
+    });
     await this.upsertWorkspaceRoot(nextPath, { label: nextName, activate: true, previousPath: existing.path });
 
     return this.toProject(nextPath, nextName, nextMeta);
@@ -126,9 +132,9 @@ export class JsonStore {
       return false;
     }
 
-    const data = await this.read();
-    delete data.projectMetadata[project.path];
-    await this.write(data);
+    await this.mutateData((data) => {
+      delete data.projectMetadata[project.path];
+    });
     await this.removeWorkspaceRoot(project.path);
     return true;
   }
@@ -139,12 +145,12 @@ export class JsonStore {
       return;
     }
 
-    const data = await this.read();
-    data.projectMetadata[project.path] = {
-      ...data.projectMetadata[project.path],
-      lastOpenedAt: new Date().toISOString()
-    };
-    await this.write(data);
+    await this.mutateData((data) => {
+      data.projectMetadata[project.path] = {
+        ...data.projectMetadata[project.path],
+        lastOpenedAt: new Date().toISOString()
+      };
+    });
     await this.upsertWorkspaceRoot(project.path, { activate: true });
   }
 
@@ -154,18 +160,18 @@ export class JsonStore {
   }
 
   async createAdminAccount(username: string, password: string): Promise<void> {
-    const data = await this.read();
-    if (data.accounts.length > 0) {
-      throw new Error("管理员账号已经存在。");
-    }
+    await this.mutateData((data) => {
+      if (data.accounts.length > 0) {
+        throw new Error("管理员账号已经存在。");
+      }
 
-    const now = new Date().toISOString();
-    data.accounts.push({
-      username: normalizeUsername(username),
-      ...hashPassword(password),
-      createdAt: now
+      const now = new Date().toISOString();
+      data.accounts.push({
+        username: normalizeUsername(username),
+        ...hashPassword(password),
+        createdAt: now
+      });
     });
-    await this.write(data);
   }
 
   async login(username: string, password: string, deviceName?: string): Promise<string | undefined> {
@@ -181,25 +187,23 @@ export class JsonStore {
   }
 
   async revokeToken(token: string): Promise<void> {
-    const data = await this.read();
     const tokenHash = hashToken(token);
-    data.devices = data.devices.filter((item) => item.tokenHash !== tokenHash);
-    await this.write(data);
+    await this.mutateData((data) => {
+      data.devices = data.devices.filter((item) => item.tokenHash !== tokenHash);
+    });
   }
 
   async createDeviceToken(deviceName?: string, accountUsername?: string): Promise<string> {
     const token = `cul_${randomBytes(32).toString("base64url")}`;
-    const data = await this.read();
-
-    data.devices.push({
-      id: nanoid(12),
-      accountUsername,
-      deviceName: normalizeOptional(deviceName),
-      tokenHash: hashToken(token),
-      createdAt: new Date().toISOString()
+    await this.mutateData((data) => {
+      data.devices.push({
+        id: nanoid(12),
+        accountUsername,
+        deviceName: normalizeOptional(deviceName),
+        tokenHash: hashToken(token),
+        createdAt: new Date().toISOString()
+      });
     });
-
-    await this.write(data);
     return token;
   }
 
@@ -213,8 +217,6 @@ export class JsonStore {
       return false;
     }
 
-    device.lastUsedAt = new Date().toISOString();
-    await this.write(data);
     return true;
   }
 
@@ -257,6 +259,21 @@ export class JsonStore {
     await fs.rename(tempPath, this.filePath);
   }
 
+  private async mutateData<T>(mutator: (data: StoredData) => Promise<T> | T): Promise<T> {
+    const operation = this.dataMutationQueue.then(async () => {
+      const data = await this.read();
+      const result = await mutator(data);
+      await this.write(data);
+      return result;
+    });
+
+    this.dataMutationQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
   private async readWorkspaceState(): Promise<WorkspaceState> {
     const payload = await this.readCodexGlobalState();
     return {
@@ -271,49 +288,47 @@ export class JsonStore {
     projectPath: string,
     options: { label?: string; activate?: boolean; previousPath?: string } = {}
   ): Promise<void> {
-    const payload = await this.readCodexGlobalState();
-    const workspace = {
-      order: normalizeStringArray(payload["electron-saved-workspace-roots"]),
-      active: normalizeStringArray(payload["active-workspace-roots"]),
-      projectOrder: normalizeStringArray(payload["project-order"]),
-      labels: normalizeStringRecord(payload["electron-workspace-root-labels"])
-    };
+    await this.mutateCodexGlobalState((payload) => {
+      const workspace = {
+        order: normalizeStringArray(payload["electron-saved-workspace-roots"]),
+        active: normalizeStringArray(payload["active-workspace-roots"]),
+        projectOrder: normalizeStringArray(payload["project-order"]),
+        labels: normalizeStringRecord(payload["electron-workspace-root-labels"])
+      };
 
-    const previousPath = options.previousPath && options.previousPath !== projectPath ? options.previousPath : undefined;
-    const withoutPrevious = (items: string[]) => items.filter((item) => item !== projectPath && item !== previousPath);
+      const previousPath = options.previousPath && options.previousPath !== projectPath ? options.previousPath : undefined;
+      const withoutPrevious = (items: string[]) => items.filter((item) => item !== projectPath && item !== previousPath);
 
-    payload["electron-saved-workspace-roots"] = [projectPath, ...withoutPrevious(workspace.order)];
-    payload["project-order"] = [projectPath, ...withoutPrevious(workspace.projectOrder)];
-    payload["active-workspace-roots"] = options.activate
-      ? [projectPath, ...withoutPrevious(workspace.active)]
-      : withoutPrevious(workspace.active);
+      payload["electron-saved-workspace-roots"] = [projectPath, ...withoutPrevious(workspace.order)];
+      payload["project-order"] = [projectPath, ...withoutPrevious(workspace.projectOrder)];
+      payload["active-workspace-roots"] = options.activate
+        ? [projectPath, ...withoutPrevious(workspace.active)]
+        : withoutPrevious(workspace.active);
 
-    if (previousPath) {
-      delete workspace.labels[previousPath];
-    }
-    if (options.label?.trim()) {
-      workspace.labels[projectPath] = options.label.trim();
-    }
-    payload["electron-workspace-root-labels"] = workspace.labels;
-
-    await this.writeCodexGlobalState(payload);
+      if (previousPath) {
+        delete workspace.labels[previousPath];
+      }
+      if (options.label?.trim()) {
+        workspace.labels[projectPath] = options.label.trim();
+      }
+      payload["electron-workspace-root-labels"] = workspace.labels;
+    });
   }
 
   private async removeWorkspaceRoot(projectPath: string): Promise<void> {
-    const payload = await this.readCodexGlobalState();
-    const labels = normalizeStringRecord(payload["electron-workspace-root-labels"]);
-    delete labels[projectPath];
+    await this.mutateCodexGlobalState((payload) => {
+      const labels = normalizeStringRecord(payload["electron-workspace-root-labels"]);
+      delete labels[projectPath];
 
-    payload["electron-saved-workspace-roots"] = normalizeStringArray(payload["electron-saved-workspace-roots"]).filter(
-      (item) => item !== projectPath
-    );
-    payload["active-workspace-roots"] = normalizeStringArray(payload["active-workspace-roots"]).filter(
-      (item) => item !== projectPath
-    );
-    payload["project-order"] = normalizeStringArray(payload["project-order"]).filter((item) => item !== projectPath);
-    payload["electron-workspace-root-labels"] = labels;
-
-    await this.writeCodexGlobalState(payload);
+      payload["electron-saved-workspace-roots"] = normalizeStringArray(payload["electron-saved-workspace-roots"]).filter(
+        (item) => item !== projectPath
+      );
+      payload["active-workspace-roots"] = normalizeStringArray(payload["active-workspace-roots"]).filter(
+        (item) => item !== projectPath
+      );
+      payload["project-order"] = normalizeStringArray(payload["project-order"]).filter((item) => item !== projectPath);
+      payload["electron-workspace-root-labels"] = labels;
+    });
   }
 
   private async readCodexGlobalState(): Promise<Record<string, unknown>> {
@@ -331,6 +346,21 @@ export class JsonStore {
     const tempPath = `${this.codexGlobalStatePath}.${process.pid}.${Date.now()}.tmp`;
     await fs.writeFile(tempPath, JSON.stringify(payload), "utf8");
     await fs.rename(tempPath, this.codexGlobalStatePath);
+  }
+
+  private async mutateCodexGlobalState<T>(mutator: (payload: Record<string, unknown>) => Promise<T> | T): Promise<T> {
+    const operation = this.codexStateMutationQueue.then(async () => {
+      const payload = await this.readCodexGlobalState();
+      const result = await mutator(payload);
+      await this.writeCodexGlobalState(payload);
+      return result;
+    });
+
+    this.codexStateMutationQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
   }
 
   private toProject(projectPath: string, label: string | undefined, metadata: ProjectMetadata | undefined): Project {

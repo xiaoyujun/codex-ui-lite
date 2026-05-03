@@ -204,9 +204,9 @@ export function ProjectWorkspaceView({
     onSnapshotChange({ activeTerminalId: selectedId, activeCodexWindowId: window.id });
   }
 
-  function handleCodexWindowChange(nextWindow: CodexWindow) {
+  const handleCodexWindowChange = useCallback((nextWindow: CodexWindow) => {
     setCodexWindows((current) => current.map((item) => (item.id === nextWindow.id ? nextWindow : item)));
-  }
+  }, []);
 
   const handleSessionUpdate = useCallback(() => {
     if (selectedSessionId) {

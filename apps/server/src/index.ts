@@ -14,7 +14,7 @@ import {
   type SaveMarkdownFileRequest,
   type UploadCodexAttachmentRequest
 } from "@codex-ui/shared";
-import { authMiddleware, verifyWsToken } from "./auth.js";
+import { authMiddleware, extractWsToken, verifyWsToken } from "./auth.js";
 import {
   attachCodexWindow,
   cancelCodexTask,
@@ -402,7 +402,10 @@ app.use((error: unknown, _request: express.Request, response: express.Response<A
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) => (protocols.has("codex-ui-lite") ? "codex-ui-lite" : false)
+});
 
 server.on("upgrade", async (request, socket, head) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -412,7 +415,7 @@ server.on("upgrade", async (request, socket, head) => {
     return;
   }
 
-  const token = url.searchParams.get("token");
+  const token = extractWsToken(request.headers["sec-websocket-protocol"], url.searchParams.get("token"));
   const projectId = url.searchParams.get("projectId");
   const terminalId = url.searchParams.get("terminalId") ?? undefined;
   const windowId = url.searchParams.get("windowId") ?? undefined;

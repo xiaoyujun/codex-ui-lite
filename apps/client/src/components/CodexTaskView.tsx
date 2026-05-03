@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import type { CodexAttachment, CodexTask, CodexTaskServerMessage, CodexWindow, Project } from "@codex-ui/shared";
 import type { Connection } from "../types.js";
-import { cancelCodexTask, codexWindowUrl, createCodexTask, uploadCodexAttachment } from "../api.js";
+import { cancelCodexTask, codexWindowUrl, createCodexTask, uploadCodexAttachment, websocketProtocols } from "../api.js";
 
 type Props = {
   connection: Connection;
@@ -28,6 +28,8 @@ const maxClientAttachmentBytes = 10 * 1024 * 1024;
 export function CodexTaskView({ connection, project, window: codexWindow, onWindowChange }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const codexWindowRef = useRef(codexWindow);
+  const onWindowChangeRef = useRef(onWindowChange);
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
   const [showLogTaskId, setShowLogTaskId] = useState<string>();
@@ -38,7 +40,15 @@ export function CodexTaskView({ connection, project, window: codexWindow, onWind
   const runningTask = useMemo(() => codexWindow.tasks.find((task) => task.status === "running"), [codexWindow.tasks]);
 
   useEffect(() => {
-    const socket = new WebSocket(codexWindowUrl(connection, project.id, codexWindow.id));
+    codexWindowRef.current = codexWindow;
+  }, [codexWindow]);
+
+  useEffect(() => {
+    onWindowChangeRef.current = onWindowChange;
+  }, [onWindowChange]);
+
+  useEffect(() => {
+    const socket = new WebSocket(codexWindowUrl(connection, project.id, codexWindow.id), websocketProtocols(connection));
 
     socket.addEventListener("message", (event) => {
       let message: CodexTaskServerMessage;
@@ -50,12 +60,14 @@ export function CodexTaskView({ connection, project, window: codexWindow, onWind
       }
 
       if (message.type === "snapshot" || message.type === "done") {
-        onWindowChange(message.window);
+        codexWindowRef.current = message.window;
+        onWindowChangeRef.current(message.window);
         scrollToBottomSoon();
       } else if (message.type === "log") {
-        onWindowChange({
-          ...codexWindow,
-          tasks: codexWindow.tasks.map((task) =>
+        const currentWindow = codexWindowRef.current;
+        const nextWindow = {
+          ...currentWindow,
+          tasks: currentWindow.tasks.map((task) =>
             task.id === message.taskId
               ? {
                   ...task,
@@ -64,7 +76,9 @@ export function CodexTaskView({ connection, project, window: codexWindow, onWind
                 }
               : task
           )
-        });
+        };
+        codexWindowRef.current = nextWindow;
+        onWindowChangeRef.current(nextWindow);
       } else if (message.type === "error") {
         setError(message.message);
       }
@@ -75,7 +89,7 @@ export function CodexTaskView({ connection, project, window: codexWindow, onWind
     });
 
     return () => socket.close();
-  }, [connection.serverUrl, connection.token, project.id, codexWindow.id, codexWindow.tasks, onWindowChange]);
+  }, [connection.serverUrl, connection.token, project.id, codexWindow.id]);
 
   useEffect(() => {
     scrollToBottomSoon();

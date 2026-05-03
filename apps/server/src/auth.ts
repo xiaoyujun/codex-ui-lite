@@ -40,6 +40,16 @@ export async function verifyWsToken(store: JsonStore, token: string | null, auth
   return !!token && (await store.verifyToken(token));
 }
 
+export function extractWsToken(protocolHeader: string | string[] | undefined, queryToken: string | null): string | null {
+  const rawProtocols = Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader;
+  const protocolToken = rawProtocols
+    ?.split(",")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith("auth."));
+
+  return protocolToken ? protocolToken.slice("auth.".length) : queryToken;
+}
+
 export function extractBearerToken(header?: string): string | undefined {
   if (!header) {
     return undefined;

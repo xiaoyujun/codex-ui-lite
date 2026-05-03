@@ -180,7 +180,6 @@ export function terminalUrl(connection: Connection, projectId: string, terminalI
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("projectId", projectId);
   url.searchParams.set("terminalId", terminalId);
-  url.searchParams.set("token", connection.token);
   return url.toString();
 }
 
@@ -190,8 +189,11 @@ export function codexWindowUrl(connection: Connection, projectId: string, window
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("projectId", projectId);
   url.searchParams.set("windowId", windowId);
-  url.searchParams.set("token", connection.token);
   return url.toString();
+}
+
+export function websocketProtocols(connection: Connection): string[] {
+  return ["codex-ui-lite", `auth.${connection.token}`];
 }
 
 export function encodeTerminalMessage(message: TerminalClientMessage): string {
