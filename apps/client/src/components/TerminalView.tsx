@@ -115,8 +115,9 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       try {
         message = JSON.parse(raw) as TerminalServerMessage;
       } catch {
+        const scrollAnchor = captureScrollAnchor();
         terminal.writeln(raw);
-        terminal.scrollToBottom();
+        restoreScrollAnchor(scrollAnchor);
         return;
       }
 
@@ -127,16 +128,18 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
         queueTerminalWrite(message.data);
       } else if (message.type === "exit") {
         flushTerminalWrite();
+        const scrollAnchor = captureScrollAnchor();
         terminal.writeln("");
         terminal.writeln(`[进程已退出 ${message.code ?? message.signal ?? ""}]`);
-        terminal.scrollToBottom();
+        restoreScrollAnchor(scrollAnchor);
         setStatus("已退出");
         setStatusKind("exited");
         onSessionUpdate();
       } else if (message.type === "error") {
         flushTerminalWrite();
+        const scrollAnchor = captureScrollAnchor();
         terminal.writeln(message.message);
-        terminal.scrollToBottom();
+        restoreScrollAnchor(scrollAnchor);
         setStatus("错误");
         setStatusKind("error");
       }
@@ -159,7 +162,8 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
       const data = outputQueueRef.current;
       outputQueueRef.current = "";
-      terminal.write(data, () => terminal.scrollToBottom());
+      const scrollAnchor = captureScrollAnchor();
+      terminal.write(data, () => restoreScrollAnchor(scrollAnchor));
     }
 
     function scheduleFit() {
@@ -175,6 +179,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
     function fitTerminal() {
       try {
+        const scrollAnchor = captureScrollAnchor();
         fit.fit();
         const nextSize = { cols: terminal.cols, rows: terminal.rows };
 
@@ -187,7 +192,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
           });
         }
 
-        terminal.scrollToBottom();
+        restoreScrollAnchor(scrollAnchor);
       } catch {
         // Fit can fail while the container is not yet visible.
       }
@@ -196,6 +201,23 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     function send(message: Parameters<typeof encodeTerminalMessage>[0]) {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(encodeTerminalMessage(message));
+      }
+    }
+
+    function captureScrollAnchor() {
+      const buffer = terminal.buffer.active;
+
+      return {
+        followOutput: buffer.baseY - buffer.viewportY <= 1,
+        viewportY: buffer.viewportY
+      };
+    }
+
+    function restoreScrollAnchor(anchor: ReturnType<typeof captureScrollAnchor>) {
+      if (anchor.followOutput) {
+        terminal.scrollToBottom();
+      } else {
+        terminal.scrollToLine(anchor.viewportY);
       }
     }
 
