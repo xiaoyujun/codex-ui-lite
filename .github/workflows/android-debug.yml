@@ -1,0 +1,42 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync Capacitor Android project
+        run: npm run android:sync -w @codex-ui/client
+
+      - name: Build debug APK
+        working-directory: apps/client/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-ui-lite-debug-apk
+          path: apps/client/android/app/build/outputs/apk/debug/app-debug.apk

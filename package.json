@@ -1,0 +1,34 @@
+{
+  "name": "codex-ui-lite",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clean-room mobile-friendly project manager and terminal UI for Codex CLI.",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "terminal",
+    "react",
+    "capacitor",
+    "android",
+    "markdown"
+  ],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev -w @codex-ui/server\" \"npm run dev -w @codex-ui/client\"",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "android:sync": "npm run android:sync -w @codex-ui/client",
+    "android:debug": "npm run android:debug -w @codex-ui/client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

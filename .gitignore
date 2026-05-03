@@ -1,0 +1,39 @@
+node_modules/
+
+# Build output
+dist/
+apps/**/dist/
+apps/client/build/
+
+# Local environment and runtime state
+.env
+.env.*
+!.env.example
+*.log
+data/
+apps/server/data/
+tmp-*.log
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Capacitor / Android generated files
+apps/client/.capacitor/
+apps/client/android/.gradle/
+apps/client/android/local.properties
+apps/client/android/build/
+apps/client/android/app/build/
+apps/client/android/build/reports/
+apps/client/android/app/src/main/assets/public/
+apps/client/android/app/src/main/assets/capacitor.config.json
+apps/client/android/app/src/main/assets/capacitor.plugins.json
+
+# Android signing and service credentials
+*.jks
+*.keystore
+key.properties
+google-services.json
+apps/client/android/app/google-services.json
