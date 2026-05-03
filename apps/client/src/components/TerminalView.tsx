@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Play, Power, RotateCcw, SquareTerminal, Zap } from "lucide-react";
+import { Copy, Eraser, Play, Power, RotateCcw, SquareTerminal, Zap } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import type { Project, TerminalServerMessage, TerminalSession } from "@codex-ui/shared";
@@ -18,7 +18,12 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const outputQueueRef = useRef("");
+  const writeFrameRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const lastSizeRef = useRef({ cols: 0, rows: 0 });
   const [status, setStatus] = useState(session.status === "exited" ? "已退出" : "连接中");
+  const [statusKind, setStatusKind] = useState(session.status === "exited" ? "exited" : "connecting");
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
@@ -29,18 +34,40 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     }
 
     setStatus(session.status === "exited" ? "已退出" : "连接中");
+    setStatusKind(session.status === "exited" ? "exited" : "connecting");
 
     const terminal = new Terminal({
       cursorBlink: true,
+      cursorStyle: "bar",
       fontFamily: "Cascadia Mono, JetBrains Mono, Consolas, monospace",
-      fontSize: 13,
-      lineHeight: 1.15,
-      scrollback: 5000,
+      fontSize: 14,
+      lineHeight: 1.2,
+      scrollback: 8000,
+      fastScrollModifier: "alt",
+      fastScrollSensitivity: 5,
+      scrollSensitivity: 1,
       theme: {
-        background: "#0c0f14",
-        foreground: "#e6edf3",
-        cursor: "#79c0ff",
-        selectionBackground: "#264f78"
+        background: "#090d13",
+        foreground: "#d7e1ec",
+        cursor: "#61afef",
+        cursorAccent: "#090d13",
+        selectionBackground: "#294866",
+        black: "#090d13",
+        red: "#ff6b6b",
+        green: "#51cf66",
+        yellow: "#ffd43b",
+        blue: "#61afef",
+        magenta: "#c678dd",
+        cyan: "#56b6c2",
+        white: "#d7e1ec",
+        brightBlack: "#5c677a",
+        brightRed: "#ff8787",
+        brightGreen: "#69db7c",
+        brightYellow: "#ffe066",
+        brightBlue: "#74b9ff",
+        brightMagenta: "#d0a6ea",
+        brightCyan: "#66d9e8",
+        brightWhite: "#f8fbff"
       }
     });
     const fit = new FitAddon();
@@ -51,10 +78,10 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     socketRef.current = socket;
     terminal.loadAddon(fit);
     terminal.open(container);
-    fit.fit();
+    scheduleFit();
     terminal.focus();
 
-    const resizeObserver = new ResizeObserver(() => fitTerminal());
+    const resizeObserver = new ResizeObserver(() => scheduleFit());
     resizeObserver.observe(container);
 
     const dataDisposable = terminal.onData((data) => {
@@ -62,8 +89,9 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     });
 
     socket.addEventListener("open", () => {
-      setStatus("已连接");
-      fitTerminal();
+      setStatus("握手中");
+      setStatusKind("connecting");
+      scheduleFit();
     });
 
     socket.addEventListener("message", (event) => {
@@ -72,10 +100,12 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
     socket.addEventListener("close", () => {
       setStatus((current) => (current === "已退出" ? current : "已断开"));
+      setStatusKind((current) => (current === "exited" ? current : "offline"));
     });
 
     socket.addEventListener("error", () => {
       setStatus("错误");
+      setStatusKind("error");
     });
 
     function handleServerMessage(raw: string) {
@@ -89,28 +119,69 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       }
 
       if (message.type === "ready") {
-        setStatus(message.shell);
+        setStatus(shortShellName(message.shell));
+        setStatusKind("running");
       } else if (message.type === "output") {
-        terminal.write(message.data);
+        queueTerminalWrite(message.data);
       } else if (message.type === "exit") {
+        flushTerminalWrite();
         terminal.writeln("");
         terminal.writeln(`[进程已退出 ${message.code ?? message.signal ?? ""}]`);
         setStatus("已退出");
+        setStatusKind("exited");
         onSessionUpdate();
       } else if (message.type === "error") {
+        flushTerminalWrite();
         terminal.writeln(message.message);
         setStatus("错误");
+        setStatusKind("error");
       }
+    }
+
+    function queueTerminalWrite(data: string) {
+      outputQueueRef.current += data;
+
+      if (writeFrameRef.current === null) {
+        writeFrameRef.current = window.requestAnimationFrame(() => flushTerminalWrite());
+      }
+    }
+
+    function flushTerminalWrite() {
+      writeFrameRef.current = null;
+
+      if (!outputQueueRef.current) {
+        return;
+      }
+
+      const data = outputQueueRef.current;
+      outputQueueRef.current = "";
+      terminal.write(data);
+    }
+
+    function scheduleFit() {
+      if (resizeFrameRef.current !== null) {
+        return;
+      }
+
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        fitTerminal();
+      });
     }
 
     function fitTerminal() {
       try {
         fit.fit();
-        send({
-          type: "resize",
-          cols: terminal.cols,
-          rows: terminal.rows
-        });
+        const nextSize = { cols: terminal.cols, rows: terminal.rows };
+
+        if (lastSizeRef.current.cols !== nextSize.cols || lastSizeRef.current.rows !== nextSize.rows) {
+          lastSizeRef.current = nextSize;
+          send({
+            type: "resize",
+            cols: nextSize.cols,
+            rows: nextSize.rows
+          });
+        }
       } catch {
         // Fit can fail while the container is not yet visible.
       }
@@ -125,6 +196,15 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     return () => {
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      if (writeFrameRef.current !== null) {
+        window.cancelAnimationFrame(writeFrameRef.current);
+      }
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current);
+      }
+      outputQueueRef.current = "";
+      writeFrameRef.current = null;
+      resizeFrameRef.current = null;
       socket.close();
       terminal.dispose();
       terminalRef.current = null;
@@ -141,6 +221,21 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     }
   }
 
+  function clearTerminal() {
+    terminalRef.current?.clear();
+    terminalRef.current?.focus();
+  }
+
+  function copySelection() {
+    const selection = terminalRef.current?.getSelection();
+
+    if (selection) {
+      void navigator.clipboard?.writeText(selection).catch(() => undefined);
+    }
+
+    terminalRef.current?.focus();
+  }
+
   return (
     <section className="terminal-layout workspace-terminal">
       <div className="toolbar terminal-toolbar">
@@ -149,7 +244,13 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
           <h2>{session.title}</h2>
         </div>
         <div className="toolbar-actions">
-          <span className="terminal-status">{status}</span>
+          <span className={`terminal-status ${statusKind}`}>{status}</span>
+          <button className="icon-button" type="button" title="复制选中内容" onClick={copySelection}>
+            <Copy size={18} />
+          </button>
+          <button className="icon-button" type="button" title="清空屏幕" onClick={clearTerminal}>
+            <Eraser size={18} />
+          </button>
           <button className="icon-button" type="button" title="重新连接" onClick={() => setNonce((value) => value + 1)}>
             <RotateCcw size={18} />
           </button>
@@ -168,8 +269,21 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
       </div>
 
       <div className="terminal-frame">
+        <div className="terminal-chrome">
+          <span className="terminal-dots" aria-hidden="true">
+            <i className="red" />
+            <i className="yellow" />
+            <i className="green" />
+          </span>
+          <span className="terminal-path">{project.path}</span>
+        </div>
         <div ref={containerRef} className="terminal-container" />
       </div>
     </section>
   );
+}
+
+function shortShellName(shell: string): string {
+  const name = shell.split(/[\\/]/).pop();
+  return name || shell;
 }

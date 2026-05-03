@@ -30,6 +30,8 @@ npm run build
 npm run dev
 ```
 
+Windows 也可以直接双击根目录的 `Start-CodexUI.bat` 启动开发服务。
+
 默认地址：
 
 - 网页端: `http://localhost:5177`

@@ -16,12 +16,16 @@ type TerminalRuntime = TerminalSession & {
   term: PtyProcess;
   sockets: Set<WebSocket>;
   buffer: string;
+  pendingOutput: string;
+  outputFlushTimer?: ReturnType<typeof setTimeout>;
   cols: number;
   rows: number;
 };
 
 const sessions = new Map<string, TerminalRuntime>();
 const outputBufferLimit = 400_000;
+const outputFlushMs = 12;
+const outputFlushLimit = 64_000;
 
 export function listTerminalSessions(projectId: string): TerminalSession[] {
   return [...sessions.values()]
@@ -56,6 +60,7 @@ export async function createTerminalSession(
     }),
     sockets: new Set(),
     buffer: "",
+    pendingOutput: "",
     cols: 100,
     rows: 30
   };
@@ -65,10 +70,11 @@ export async function createTerminalSession(
   session.term.onData((data) => {
     session.updatedAt = new Date().toISOString();
     session.buffer = appendBuffer(session.buffer, data);
-    broadcast(session, { type: "output", data });
+    enqueueOutput(session, data);
   });
 
   session.term.onExit(({ exitCode, signal }) => {
+    flushOutput(session);
     session.status = "exited";
     session.exitCode = exitCode;
     session.signal = signal;
@@ -89,9 +95,11 @@ export function closeTerminalSession(projectId: string, terminalId: string): boo
 
   sessions.delete(terminalId);
   if (session.status === "running") {
+    flushOutput(session);
     broadcast(session, { type: "exit", signal: "SIGTERM" });
     disposeTerminal(session.term);
   }
+  clearOutputTimer(session);
   closeAttachedSockets(session);
   return true;
 }
@@ -110,6 +118,7 @@ export async function attachTerminal(
     return;
   }
 
+  flushOutput(session);
   session.sockets.add(socket);
   session.updatedAt = new Date().toISOString();
 
@@ -196,8 +205,47 @@ function toSession(session: TerminalRuntime): TerminalSession {
 }
 
 function broadcast(session: TerminalRuntime, message: TerminalServerMessage): void {
+  if (message.type !== "output") {
+    flushOutput(session);
+  }
+
   for (const socket of session.sockets) {
     send(socket, message);
+  }
+}
+
+function enqueueOutput(session: TerminalRuntime, data: string): void {
+  session.pendingOutput += data;
+
+  if (session.pendingOutput.length >= outputFlushLimit) {
+    flushOutput(session);
+    return;
+  }
+
+  if (!session.outputFlushTimer) {
+    session.outputFlushTimer = setTimeout(() => flushOutput(session), outputFlushMs);
+  }
+}
+
+function flushOutput(session: TerminalRuntime): void {
+  if (!session.pendingOutput) {
+    clearOutputTimer(session);
+    return;
+  }
+
+  const data = session.pendingOutput;
+  session.pendingOutput = "";
+  clearOutputTimer(session);
+
+  for (const socket of session.sockets) {
+    send(socket, { type: "output", data });
+  }
+}
+
+function clearOutputTimer(session: TerminalRuntime): void {
+  if (session.outputFlushTimer) {
+    clearTimeout(session.outputFlushTimer);
+    session.outputFlushTimer = undefined;
   }
 }
 
