@@ -8,6 +8,7 @@ import {
   type ApiError,
   type AuthLoginRequest,
   type AuthSetupRequest,
+  type CreateCodexWindowRequest,
   type CreateCodexTaskRequest,
   type CreateTerminalSessionRequest,
   type SaveMarkdownFileRequest,
@@ -15,11 +16,12 @@ import {
 } from "@codex-ui/shared";
 import { authMiddleware, verifyWsToken } from "./auth.js";
 import {
-  attachCodexTask,
+  attachCodexWindow,
   cancelCodexTask,
   createCodexTask,
-  getCodexTask,
-  listCodexTasks,
+  createCodexWindow,
+  closeCodexWindow,
+  listCodexWindows,
   saveCodexAttachment
 } from "./codexTasks.js";
 import { loadConfig } from "./config.js";
@@ -56,6 +58,10 @@ const codexAttachmentSchema = z.object({
   name: z.string().min(1, "附件名称不能为空。"),
   mimeType: z.string().optional().default("application/octet-stream"),
   data: z.string().min(1, "附件内容不能为空。")
+});
+
+const codexWindowCreateSchema = z.object({
+  title: z.string().optional()
 });
 
 const codexTaskCreateSchema = z.object({
@@ -248,7 +254,7 @@ app.post(
 );
 
 app.get(
-  "/api/projects/:id/codex/tasks",
+  "/api/projects/:id/codex/windows",
   asyncRoute(async (request, response) => {
     const project = await store.getProject(paramValue(request.params.id));
 
@@ -257,33 +263,28 @@ app.get(
       return;
     }
 
-    response.json(listCodexTasks(project.id));
-  })
-);
-
-app.get(
-  "/api/projects/:id/codex/tasks/:taskId",
-  asyncRoute(async (request, response) => {
-    const project = await store.getProject(paramValue(request.params.id));
-
-    if (!project) {
-      response.status(404).json({ error: "项目不存在。" });
-      return;
-    }
-
-    const task = getCodexTask(project.id, paramValue(request.params.taskId));
-
-    if (!task) {
-      response.status(404).json({ error: "Codex 任务不存在。" });
-      return;
-    }
-
-    response.json(task);
+    response.json(listCodexWindows(project.id));
   })
 );
 
 app.post(
-  "/api/projects/:id/codex/tasks",
+  "/api/projects/:id/codex/windows",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const body = codexWindowCreateSchema.parse(request.body ?? {}) satisfies CreateCodexWindowRequest;
+    await store.touchProject(project.id);
+    response.status(201).json(createCodexWindow(project, body));
+  })
+);
+
+app.post(
+  "/api/projects/:id/codex/windows/:windowId/tasks",
   asyncRoute(async (request, response) => {
     const project = await store.getProject(paramValue(request.params.id));
 
@@ -294,12 +295,12 @@ app.post(
 
     const body = codexTaskCreateSchema.parse(request.body) satisfies CreateCodexTaskRequest;
     await store.touchProject(project.id);
-    response.status(201).json(await createCodexTask(project, config, body));
+    response.status(201).json(await createCodexTask(project, config, paramValue(request.params.windowId), body));
   })
 );
 
 app.delete(
-  "/api/projects/:id/codex/tasks/:taskId",
+  "/api/projects/:id/codex/windows/:windowId/tasks/:taskId",
   asyncRoute(async (request, response) => {
     const project = await store.getProject(paramValue(request.params.id));
 
@@ -308,10 +309,31 @@ app.delete(
       return;
     }
 
-    const cancelled = cancelCodexTask(project.id, paramValue(request.params.taskId));
+    const cancelled = cancelCodexTask(project.id, paramValue(request.params.windowId), paramValue(request.params.taskId));
 
     if (!cancelled) {
       response.status(404).json({ error: "Codex 任务不存在。" });
+      return;
+    }
+
+    response.status(204).end();
+  })
+);
+
+app.delete(
+  "/api/projects/:id/codex/windows/:windowId",
+  asyncRoute(async (request, response) => {
+    const project = await store.getProject(paramValue(request.params.id));
+
+    if (!project) {
+      response.status(404).json({ error: "项目不存在。" });
+      return;
+    }
+
+    const closed = closeCodexWindow(project.id, paramValue(request.params.windowId));
+
+    if (!closed) {
+      response.status(404).json({ error: "Codex 窗口不存在。" });
       return;
     }
 
@@ -393,7 +415,7 @@ server.on("upgrade", async (request, socket, head) => {
   const token = url.searchParams.get("token");
   const projectId = url.searchParams.get("projectId");
   const terminalId = url.searchParams.get("terminalId") ?? undefined;
-  const taskId = url.searchParams.get("taskId") ?? undefined;
+  const windowId = url.searchParams.get("windowId") ?? undefined;
 
   if (!(await verifyWsToken(store, token, config.authDisabled)) || !projectId) {
     socket.destroy();
@@ -410,12 +432,12 @@ server.on("upgrade", async (request, socket, head) => {
   await store.touchProject(projectId);
   wss.handleUpgrade(request, socket, head, (websocket) => {
     if (url.pathname === "/ws/codex") {
-      if (!taskId) {
+      if (!windowId) {
         websocket.close();
         return;
       }
 
-      attachCodexTask(websocket, project, taskId);
+      attachCodexWindow(websocket, project, windowId);
       return;
     }
 

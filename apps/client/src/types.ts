@@ -14,4 +14,5 @@ export type View =
 export type WorkspaceSnapshot = {
   project?: Project;
   activeTerminalId?: string;
+  activeCodexWindowId?: string;
 };

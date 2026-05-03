@@ -7,54 +7,38 @@ import {
   FileText,
   Image as ImageIcon,
   Paperclip,
-  RefreshCw,
   Send,
   StopCircle,
+  TerminalSquare,
   X
 } from "lucide-react";
-import type { CodexAttachment, CodexTask, CodexTaskServerMessage, Project } from "@codex-ui/shared";
+import type { CodexAttachment, CodexTask, CodexTaskServerMessage, CodexWindow, Project } from "@codex-ui/shared";
 import type { Connection } from "../types.js";
-import {
-  cancelCodexTask,
-  codexTaskUrl,
-  createCodexTask,
-  listCodexTasks,
-  uploadCodexAttachment
-} from "../api.js";
+import { cancelCodexTask, codexWindowUrl, createCodexTask, uploadCodexAttachment } from "../api.js";
 
 type Props = {
   connection: Connection;
   project: Project;
+  window: CodexWindow;
+  onWindowChange(window: CodexWindow): void;
 };
 
 const maxClientAttachmentBytes = 10 * 1024 * 1024;
 
-export function CodexTaskView({ connection, project }: Props) {
+export function CodexTaskView({ connection, project, window: codexWindow, onWindowChange }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
-  const [tasks, setTasks] = useState<CodexTask[]>([]);
-  const [activeTaskId, setActiveTaskId] = useState<string>();
-  const [showLog, setShowLog] = useState(false);
+  const [showLogTaskId, setShowLogTaskId] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
 
-  const activeTask = useMemo(
-    () => tasks.find((task) => task.id === activeTaskId) ?? tasks[0],
-    [activeTaskId, tasks]
-  );
+  const runningTask = useMemo(() => codexWindow.tasks.find((task) => task.status === "running"), [codexWindow.tasks]);
 
   useEffect(() => {
-    refreshTasks();
-  }, [connection.serverUrl, connection.token, project.id]);
-
-  useEffect(() => {
-    if (!activeTask || activeTask.status !== "running") {
-      return;
-    }
-
-    const socket = new WebSocket(codexTaskUrl(connection, project.id, activeTask.id));
+    const socket = new WebSocket(codexWindowUrl(connection, project.id, codexWindow.id));
 
     socket.addEventListener("message", (event) => {
       let message: CodexTaskServerMessage;
@@ -66,35 +50,36 @@ export function CodexTaskView({ connection, project }: Props) {
       }
 
       if (message.type === "snapshot" || message.type === "done") {
-        upsertTask(message.task);
+        onWindowChange(message.window);
+        scrollToBottomSoon();
       } else if (message.type === "log") {
-        updateTaskLog(message.taskId, message.data);
+        onWindowChange({
+          ...codexWindow,
+          tasks: codexWindow.tasks.map((task) =>
+            task.id === message.taskId
+              ? {
+                  ...task,
+                  logTail: appendTail(task.logTail, message.data),
+                  updatedAt: new Date().toISOString()
+                }
+              : task
+          )
+        });
       } else if (message.type === "error") {
         setError(message.message);
       }
     });
 
     socket.addEventListener("error", () => {
-      setError("Codex 任务连接已断开。");
+      setError("Codex 窗口连接已断开。");
     });
 
     return () => socket.close();
-  }, [connection.serverUrl, connection.token, project.id, activeTask?.id, activeTask?.status]);
+  }, [connection.serverUrl, connection.token, project.id, codexWindow.id, codexWindow.tasks, onWindowChange]);
 
-  async function refreshTasks() {
-    setBusy(true);
-    setError("");
-
-    try {
-      const nextTasks = await listCodexTasks(connection, project.id);
-      setTasks(nextTasks);
-      setActiveTaskId((current) => current ?? nextTasks[0]?.id);
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "无法读取 Codex 任务。");
-    } finally {
-      setBusy(false);
-    }
-  }
+  useEffect(() => {
+    scrollToBottomSoon();
+  }, [codexWindow.id]);
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) {
@@ -135,7 +120,7 @@ export function CodexTaskView({ connection, project }: Props) {
   async function sendTask() {
     const nextPrompt = prompt.trim();
 
-    if (!nextPrompt) {
+    if (!nextPrompt || runningTask) {
       return;
     }
 
@@ -143,17 +128,17 @@ export function CodexTaskView({ connection, project }: Props) {
     setError("");
 
     try {
-      const created = await createCodexTask(connection, project.id, {
+      const nextWindow = await createCodexTask(connection, project.id, codexWindow.id, {
         prompt: nextPrompt,
         attachmentIds: attachments.map((attachment) => attachment.id)
       });
-      setTasks((current) => [created, ...current]);
-      setActiveTaskId(created.id);
+      onWindowChange(nextWindow);
       setPrompt("");
       setAttachments([]);
-      setShowLog(false);
+      setShowLogTaskId(undefined);
+      scrollToBottomSoon();
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "无法创建 Codex 任务。");
+      setError(nextError instanceof Error ? nextError.message : "无法发送到 Codex 窗口。");
     } finally {
       setBusy(false);
     }
@@ -164,189 +149,170 @@ export function CodexTaskView({ connection, project }: Props) {
     setError("");
 
     try {
-      await cancelCodexTask(connection, project.id, task.id);
-      upsertTask({ ...task, status: "cancelled", updatedAt: new Date().toISOString() });
+      await cancelCodexTask(connection, project.id, codexWindow.id, task.id);
+      onWindowChange({
+        ...codexWindow,
+        status: "cancelled",
+        updatedAt: new Date().toISOString(),
+        tasks: codexWindow.tasks.map((item) => (item.id === task.id ? { ...item, status: "cancelled" } : item))
+      });
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "无法取消 Codex 任务。");
+      setError(nextError instanceof Error ? nextError.message : "无法停止 Codex。");
     } finally {
       setBusy(false);
     }
-  }
-
-  function upsertTask(nextTask: CodexTask) {
-    setTasks((current) => {
-      const exists = current.some((task) => task.id === nextTask.id);
-      return exists ? current.map((task) => (task.id === nextTask.id ? nextTask : task)) : [nextTask, ...current];
-    });
-  }
-
-  function updateTaskLog(taskId: string, data: string) {
-    setTasks((current) =>
-      current.map((task) =>
-        task.id === taskId
-          ? {
-              ...task,
-              logTail: appendTail(task.logTail, data),
-              updatedAt: new Date().toISOString()
-            }
-          : task
-      )
-    );
   }
 
   function removeAttachment(id: string) {
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
-  const canSend = Boolean(prompt.trim()) && !busy && !uploading;
+  function scrollToBottomSoon() {
+    globalThis.requestAnimationFrame(() => {
+      const element = scrollRef.current;
+      if (element) {
+        element.scrollTop = element.scrollHeight;
+      }
+    });
+  }
+
+  const canSend = Boolean(prompt.trim()) && !busy && !uploading && !runningTask;
 
   return (
-    <section className="codex-task-layout">
-      <aside className="codex-task-sidebar">
-        <div className="codex-task-sidebar-heading">
-          <span>任务记录</span>
-          <button className="icon-button" type="button" title="刷新任务" onClick={refreshTasks} disabled={busy}>
-            <RefreshCw size={17} />
-          </button>
+    <section className="codex-window-layout">
+      <div className="codex-window-header">
+        <div className="section-heading">
+          <TerminalSquare size={18} />
+          <h2>{codexWindow.title}</h2>
         </div>
+        <span className={`codex-task-status ${codexWindow.status}`}>{statusText(codexWindow.status)}</span>
+      </div>
 
-        <div className="codex-task-list">
-          {tasks.length ? (
-            tasks.map((task) => (
-              <button
-                className={`codex-task-row ${activeTask?.id === task.id ? "active" : ""}`}
-                key={task.id}
-                type="button"
-                onClick={() => setActiveTaskId(task.id)}
-              >
-                {statusIcon(task.status)}
-                <span>{task.prompt}</span>
-                <em>{statusText(task.status)}</em>
-              </button>
-            ))
-          ) : (
-            <div className="codex-task-empty">还没有任务</div>
-          )}
-        </div>
-      </aside>
-
-      <div className="codex-task-main">
-        <article className="codex-answer-panel">
-          {activeTask ? (
-            <>
-              <div className="codex-answer-heading">
-                <div>
-                  <span className={`codex-task-status ${activeTask.status}`}>{statusText(activeTask.status)}</span>
-                  <h3>{activeTask.prompt}</h3>
+      <div ref={scrollRef} className="codex-message-scroll">
+        {codexWindow.tasks.length ? (
+          codexWindow.tasks.map((task) => (
+            <article className="codex-message-group" key={task.id}>
+              <div className="codex-message user">
+                <div className="codex-message-avatar">你</div>
+                <div className="codex-message-body">
+                  <pre>{task.prompt}</pre>
+                  {task.attachments.length ? <AttachmentStrip attachments={task.attachments} /> : null}
                 </div>
-                <div className="toolbar-actions">
-                  <button className="secondary-button compact-button" type="button" onClick={() => setShowLog((value) => !value)}>
-                    <FileText size={16} />
-                    <span>{showLog ? "隐藏执行日志" : "显示执行日志"}</span>
-                  </button>
-                  {activeTask.status === "running" ? (
-                    <button className="secondary-button compact-button danger" type="button" onClick={() => cancelTask(activeTask)} disabled={busy}>
-                      <StopCircle size={16} />
-                      <span>停止</span>
+              </div>
+
+              <div className="codex-message assistant">
+                <div className="codex-message-avatar">
+                  <Bot size={16} />
+                </div>
+                <div className="codex-message-body">
+                  <div className="codex-message-meta">
+                    {statusIcon(task.status)}
+                    <span>{statusText(task.status)}</span>
+                    {task.status === "running" ? (
+                      <button className="inline-action danger" type="button" onClick={() => cancelTask(task)} disabled={busy}>
+                        <StopCircle size={14} />
+                        停止
+                      </button>
+                    ) : null}
+                    <button
+                      className="inline-action"
+                      type="button"
+                      onClick={() => setShowLogTaskId((current) => (current === task.id ? undefined : task.id))}
+                    >
+                      <FileText size={14} />
+                      {showLogTaskId === task.id ? "隐藏日志" : "执行日志"}
                     </button>
+                  </div>
+
+                  {task.finalMessage ? (
+                    <pre className="codex-final-output">{task.finalMessage}</pre>
+                  ) : task.status === "running" ? (
+                    <div className="codex-inline-running">Codex 正在后台处理，默认不显示思考刷屏。</div>
+                  ) : (
+                    <div className="codex-inline-running">没有生成最终回复。</div>
+                  )}
+
+                  {showLogTaskId === task.id ? (
+                    <div className="codex-log-panel">
+                      <span>执行日志</span>
+                      <pre>{task.logTail || "暂无日志"}</pre>
+                    </div>
                   ) : null}
                 </div>
               </div>
-
-              {activeTask.attachments.length ? (
-                <div className="codex-attachment-strip">
-                  {activeTask.attachments.map((attachment) => (
-                    <span className="codex-attachment-chip" key={attachment.id}>
-                      {attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
-                      {attachment.name}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="codex-answer-scroll">
-                {activeTask.finalMessage ? (
-                  <pre className="codex-final-output">{activeTask.finalMessage}</pre>
-                ) : activeTask.status === "running" ? (
-                  <div className="codex-running-state">
-                    <Bot size={40} />
-                    <span>Codex 正在后台处理</span>
-                    <p>默认隐藏思考过程和执行日志，避免页面刷屏。</p>
-                  </div>
-                ) : (
-                  <div className="codex-running-state">
-                    <AlertTriangle size={40} />
-                    <span>没有生成最终回复</span>
-                  </div>
-                )}
-
-                {showLog ? (
-                  <div className="codex-log-panel">
-                    <span>执行日志</span>
-                    <pre>{activeTask.logTail || "暂无日志"}</pre>
-                  </div>
-                ) : null}
-              </div>
-            </>
-          ) : (
-            <div className="codex-running-state">
-              <Bot size={46} />
-              <span>给 Codex 一个任务</span>
-              <p>这里不是终端视图，最终结果会以阅读页面展示。</p>
-            </div>
-          )}
-        </article>
-
-        <div className="codex-composer">
-          {error ? <p className="error-text">{error}</p> : null}
-
-          {attachments.length ? (
-            <div className="codex-attachment-strip draft">
-              {attachments.map((attachment) => (
-                <span className="codex-attachment-chip" key={attachment.id}>
-                  {attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
-                  {attachment.name}
-                  <button type="button" title="移除附件" onClick={() => removeAttachment(attachment.id)}>
-                    <X size={13} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          ) : null}
-
-          <textarea
-            className="codex-prompt-input"
-            placeholder="描述你要 Codex 完成的任务，可以附加图片、Markdown、日志或代码文件。"
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-          />
-
-          <div className="codex-composer-actions">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="visually-hidden"
-              accept="image/*,.md,.txt,.json,.yaml,.yml,.csv,.log,.js,.jsx,.ts,.tsx,.py,.java,.xml,.html,.css"
-              onChange={(event) => handleFiles(event.currentTarget.files)}
-            />
-            <button
-              className="secondary-button compact-button"
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-            >
-              <Paperclip size={16} />
-              <span>{uploading ? "上传中" : "上传附件"}</span>
-            </button>
-            <button className="primary-button compact-button" type="button" onClick={sendTask} disabled={!canSend}>
-              <Send size={16} />
-              <span>发送给 Codex</span>
-            </button>
+            </article>
+          ))
+        ) : (
+          <div className="codex-running-state">
+            <Bot size={46} />
+            <span>这是一个 Codex 窗口</span>
+            <p>像终端窗口一样保留上下文和缓存，但用对话页面显示结果。</p>
           </div>
+        )}
+      </div>
+
+      <div className="codex-composer">
+        {error ? <p className="error-text">{error}</p> : null}
+
+        {attachments.length ? (
+          <div className="codex-attachment-strip draft">
+            {attachments.map((attachment) => (
+              <span className="codex-attachment-chip" key={attachment.id}>
+                {attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
+                {attachment.name}
+                <button type="button" title="移除附件" onClick={() => removeAttachment(attachment.id)}>
+                  <X size={13} />
+                </button>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        <textarea
+          className="codex-prompt-input"
+          placeholder={runningTask ? "当前窗口正在运行，完成或停止后可继续发送。" : "给当前 Codex 窗口发送消息，可附加图片或文件。"}
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+        />
+
+        <div className="codex-composer-actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="visually-hidden"
+            accept="image/*,.md,.txt,.json,.yaml,.yml,.csv,.log,.js,.jsx,.ts,.tsx,.py,.java,.xml,.html,.css"
+            onChange={(event) => handleFiles(event.currentTarget.files)}
+          />
+          <button
+            className="secondary-button compact-button"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading || Boolean(runningTask)}
+          >
+            <Paperclip size={16} />
+            <span>{uploading ? "上传中" : "上传附件"}</span>
+          </button>
+          <button className="primary-button compact-button" type="button" onClick={sendTask} disabled={!canSend}>
+            <Send size={16} />
+            <span>发送</span>
+          </button>
         </div>
       </div>
     </section>
+  );
+}
+
+function AttachmentStrip({ attachments }: { attachments: CodexAttachment[] }) {
+  return (
+    <div className="codex-attachment-strip message">
+      {attachments.map((attachment) => (
+        <span className="codex-attachment-chip" key={attachment.id}>
+          {attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
+          {attachment.name}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -362,7 +328,11 @@ function statusIcon(status: CodexTask["status"]) {
   return <AlertTriangle size={16} />;
 }
 
-function statusText(status: CodexTask["status"]): string {
+function statusText(status: CodexTask["status"] | CodexWindow["status"]): string {
+  if (status === "idle") {
+    return "空闲";
+  }
+
   if (status === "running") {
     return "运行中";
   }

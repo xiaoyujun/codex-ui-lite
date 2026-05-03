@@ -132,6 +132,7 @@ export function App() {
               connection={connection}
               project={view.project}
               activeTerminalId={workspaceSnapshot?.activeTerminalId}
+              activeCodexWindowId={workspaceSnapshot?.activeCodexWindowId}
               onBack={handleBackToProjects}
               onSnapshotChange={handleWorkspaceSnapshot}
             />

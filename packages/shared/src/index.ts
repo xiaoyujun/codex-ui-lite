@@ -86,6 +86,7 @@ export type CodexTaskStatus = "running" | "completed" | "failed" | "cancelled";
 export type CodexTask = {
   id: string;
   projectId: string;
+  windowId: string;
   prompt: string;
   attachments: CodexAttachment[];
   status: CodexTaskStatus;
@@ -98,15 +99,29 @@ export type CodexTask = {
   updatedAt: string;
 };
 
+export type CodexWindow = {
+  id: string;
+  projectId: string;
+  title: string;
+  status: CodexTaskStatus | "idle";
+  tasks: CodexTask[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCodexWindowRequest = {
+  title?: string;
+};
+
 export type CreateCodexTaskRequest = {
   prompt: string;
   attachmentIds?: string[];
 };
 
 export type CodexTaskServerMessage =
-  | { type: "snapshot"; task: CodexTask }
-  | { type: "log"; taskId: string; stream: "stdout" | "stderr"; data: string }
-  | { type: "done"; task: CodexTask }
+  | { type: "snapshot"; window: CodexWindow }
+  | { type: "log"; windowId: string; taskId: string; stream: "stdout" | "stderr"; data: string }
+  | { type: "done"; window: CodexWindow; task: CodexTask }
   | { type: "error"; message: string };
 
 export type AuthStatus = {

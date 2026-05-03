@@ -6,7 +6,10 @@ import type {
   CodexAttachment,
   CodexTask,
   CodexTaskServerMessage,
+  CodexTaskStatus,
+  CodexWindow,
   CreateCodexTaskRequest,
+  CreateCodexWindowRequest,
   Project,
   UploadCodexAttachmentRequest
 } from "@codex-ui/shared";
@@ -16,11 +19,15 @@ import type { ServerConfig } from "./config.js";
 type CodexTaskRuntime = CodexTask & {
   process?: ChildProcessWithoutNullStreams;
   outputFile: string;
+};
+
+type CodexWindowRuntime = Omit<CodexWindow, "tasks"> & {
+  tasks: CodexTaskRuntime[];
   sockets: Set<WebSocket>;
 };
 
 const attachments = new Map<string, CodexAttachment>();
-const tasks = new Map<string, CodexTaskRuntime>();
+const windows = new Map<string, CodexWindowRuntime>();
 const maxAttachmentBytes = 10 * 1024 * 1024;
 const logTailLimit = 500_000;
 
@@ -66,23 +73,65 @@ export async function saveCodexAttachment(
   return attachment;
 }
 
-export function listCodexTasks(projectId: string): CodexTask[] {
-  return [...tasks.values()]
-    .filter((task) => task.projectId === projectId)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .map(toTask);
+export function listCodexWindows(projectId: string): CodexWindow[] {
+  return [...windows.values()]
+    .filter((window) => window.projectId === projectId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .map(toWindow);
 }
 
-export function getCodexTask(projectId: string, taskId: string): CodexTask | undefined {
-  const task = tasks.get(taskId);
-  return task?.projectId === projectId ? toTask(task) : undefined;
+export function createCodexWindow(project: Project, input: CreateCodexWindowRequest = {}): CodexWindow {
+  const now = new Date().toISOString();
+  const window: CodexWindowRuntime = {
+    id: `cw_${randomUUID().replace(/-/g, "").slice(0, 18)}`,
+    projectId: project.id,
+    title: normalizeTitle(input.title) ?? nextWindowTitle(project.id),
+    status: "idle",
+    tasks: [],
+    sockets: new Set(),
+    createdAt: now,
+    updatedAt: now
+  };
+
+  windows.set(window.id, window);
+  return toWindow(window);
+}
+
+export function closeCodexWindow(projectId: string, windowId: string): boolean {
+  const window = windows.get(windowId);
+
+  if (!window || window.projectId !== projectId) {
+    return false;
+  }
+
+  for (const task of window.tasks) {
+    if (task.status === "running") {
+      disposeProcess(task.process);
+      task.status = "cancelled";
+    }
+  }
+
+  for (const socket of window.sockets) {
+    socket.close();
+  }
+
+  window.sockets.clear();
+  windows.delete(windowId);
+  return true;
 }
 
 export async function createCodexTask(
   project: Project,
   config: ServerConfig,
+  windowId: string,
   input: CreateCodexTaskRequest
-): Promise<CodexTask> {
+): Promise<CodexWindow> {
+  const window = windows.get(windowId);
+
+  if (!window || window.projectId !== project.id) {
+    throw new Error("Codex 窗口不存在或不属于当前项目。");
+  }
+
   const prompt = input.prompt.trim();
 
   if (!prompt) {
@@ -90,34 +139,38 @@ export async function createCodexTask(
   }
 
   const selectedAttachments = resolveAttachments(project.id, input.attachmentIds ?? []);
-  const id = `c_${randomUUID().replace(/-/g, "").slice(0, 18)}`;
+  const id = `ct_${randomUUID().replace(/-/g, "").slice(0, 18)}`;
   const now = new Date().toISOString();
   const outputDirectory = path.join(config.dataDir, "codex-task-output");
   const outputFile = path.join(outputDirectory, `${id}.md`);
   const task: CodexTaskRuntime = {
     id,
     projectId: project.id,
+    windowId: window.id,
     prompt,
     attachments: selectedAttachments,
     status: "running",
+    finalMessage: undefined,
     logTail: "",
     outputFile,
-    sockets: new Set(),
     createdAt: now,
     updatedAt: now
   };
 
   await fs.mkdir(outputDirectory, { recursive: true });
-  tasks.set(id, task);
-  startCodex(project, config, task);
+  window.tasks.push(task);
+  touchWindow(window, "running");
+  broadcast(window, { type: "snapshot", window: toWindow(window) });
+  startCodex(project, config, window, task);
 
-  return toTask(task);
+  return toWindow(window);
 }
 
-export function cancelCodexTask(projectId: string, taskId: string): boolean {
-  const task = tasks.get(taskId);
+export function cancelCodexTask(projectId: string, windowId: string, taskId: string): boolean {
+  const window = windows.get(windowId);
+  const task = window?.tasks.find((item) => item.id === taskId);
 
-  if (!task || task.projectId !== projectId) {
+  if (!window || window.projectId !== projectId || !task) {
     return false;
   }
 
@@ -125,30 +178,31 @@ export function cancelCodexTask(projectId: string, taskId: string): boolean {
     task.status = "cancelled";
     task.updatedAt = new Date().toISOString();
     disposeProcess(task.process);
-    broadcast(task, { type: "done", task: toTask(task) });
+    touchWindow(window);
+    broadcast(window, { type: "done", window: toWindow(window), task: toTask(task) });
   }
 
   return true;
 }
 
-export function attachCodexTask(socket: WebSocket, project: Project, taskId: string): void {
-  const task = tasks.get(taskId);
+export function attachCodexWindow(socket: WebSocket, project: Project, windowId: string): void {
+  const window = windows.get(windowId);
 
-  if (!task || task.projectId !== project.id) {
-    send(socket, { type: "error", message: "Codex 任务不存在或不属于当前项目。" });
+  if (!window || window.projectId !== project.id) {
+    send(socket, { type: "error", message: "Codex 窗口不存在或不属于当前项目。" });
     socket.close();
     return;
   }
 
-  task.sockets.add(socket);
-  send(socket, { type: "snapshot", task: toTask(task) });
+  window.sockets.add(socket);
+  send(socket, { type: "snapshot", window: toWindow(window) });
 
   socket.on("close", () => {
-    task.sockets.delete(socket);
+    window.sockets.delete(socket);
   });
 }
 
-function startCodex(project: Project, config: ServerConfig, task: CodexTaskRuntime): void {
+function startCodex(project: Project, config: ServerConfig, window: CodexWindowRuntime, task: CodexTaskRuntime): void {
   const args = buildCodexArgs(project, task);
   const child = spawn(config.codexCommand, args, {
     cwd: project.path,
@@ -160,15 +214,15 @@ function startCodex(project: Project, config: ServerConfig, task: CodexTaskRunti
   child.stdin.end(buildPrompt(task));
 
   child.stdout.on("data", (chunk: Buffer) => {
-    appendLog(task, "stdout", chunk.toString("utf8"));
+    appendLog(window, task, "stdout", chunk.toString("utf8"));
   });
 
   child.stderr.on("data", (chunk: Buffer) => {
-    appendLog(task, "stderr", chunk.toString("utf8"));
+    appendLog(window, task, "stderr", chunk.toString("utf8"));
   });
 
   child.on("error", (error) => {
-    finishTask(task, "failed", undefined, undefined, error.message).catch(() => undefined);
+    finishTask(window, task, "failed", undefined, undefined, error.message).catch(() => undefined);
   });
 
   child.on("exit", (exitCode, signal) => {
@@ -176,7 +230,9 @@ function startCodex(project: Project, config: ServerConfig, task: CodexTaskRunti
       return;
     }
 
-    finishTask(task, exitCode === 0 ? "completed" : "failed", exitCode ?? undefined, signal ?? undefined).catch(() => undefined);
+    finishTask(window, task, exitCode === 0 ? "completed" : "failed", exitCode ?? undefined, signal ?? undefined).catch(
+      () => undefined
+    );
   });
 }
 
@@ -223,8 +279,9 @@ function buildPrompt(task: CodexTaskRuntime): string {
 }
 
 async function finishTask(
+  window: CodexWindowRuntime,
   task: CodexTaskRuntime,
-  status: CodexTask["status"],
+  status: CodexTaskStatus,
   exitCode?: number,
   signal?: number | string,
   error?: string
@@ -240,13 +297,15 @@ async function finishTask(
     task.finalMessage = task.logTail || "Codex 执行失败。";
   }
 
-  broadcast(task, { type: "done", task: toTask(task) });
+  touchWindow(window, inferWindowStatus(window));
+  broadcast(window, { type: "done", window: toWindow(window), task: toTask(task) });
 }
 
-function appendLog(task: CodexTaskRuntime, stream: "stdout" | "stderr", data: string): void {
+function appendLog(window: CodexWindowRuntime, task: CodexTaskRuntime, stream: "stdout" | "stderr", data: string): void {
   task.updatedAt = new Date().toISOString();
   task.logTail = appendTail(task.logTail, data);
-  broadcast(task, { type: "log", taskId: task.id, stream, data });
+  touchWindow(window, "running");
+  broadcast(window, { type: "log", windowId: window.id, taskId: task.id, stream, data });
 }
 
 function resolveAttachments(projectId: string, attachmentIds: string[]): CodexAttachment[] {
@@ -265,10 +324,36 @@ function resolveAttachments(projectId: string, attachmentIds: string[]): CodexAt
   return selected;
 }
 
+function touchWindow(window: CodexWindowRuntime, status = window.status): void {
+  window.status = status;
+  window.updatedAt = new Date().toISOString();
+}
+
+function inferWindowStatus(window: CodexWindowRuntime): CodexWindow["status"] {
+  if (window.tasks.some((task) => task.status === "running")) {
+    return "running";
+  }
+
+  return window.tasks.at(-1)?.status ?? "idle";
+}
+
+function toWindow(window: CodexWindowRuntime): CodexWindow {
+  return {
+    id: window.id,
+    projectId: window.projectId,
+    title: window.title,
+    status: window.status,
+    tasks: window.tasks.map(toTask),
+    createdAt: window.createdAt,
+    updatedAt: window.updatedAt
+  };
+}
+
 function toTask(task: CodexTaskRuntime): CodexTask {
   return {
     id: task.id,
     projectId: task.projectId,
+    windowId: task.windowId,
     prompt: task.prompt,
     attachments: task.attachments,
     status: task.status,
@@ -282,8 +367,8 @@ function toTask(task: CodexTaskRuntime): CodexTask {
   };
 }
 
-function broadcast(task: CodexTaskRuntime, message: CodexTaskServerMessage): void {
-  for (const socket of task.sockets) {
+function broadcast(window: CodexWindowRuntime, message: CodexTaskServerMessage): void {
+  for (const socket of window.sockets) {
     send(socket, message);
   }
 }
@@ -314,6 +399,16 @@ function sanitizeFileName(input: string): string {
 function sharedAttachmentRoot(selectedAttachments: CodexAttachment[]): string | undefined {
   const first = selectedAttachments[0];
   return first ? path.dirname(path.dirname(first.path)) : undefined;
+}
+
+function nextWindowTitle(projectId: string): string {
+  const index = [...windows.values()].filter((window) => window.projectId === projectId).length + 1;
+  return `Codex ${index}`;
+}
+
+function normalizeTitle(value?: string): string | undefined {
+  const title = value?.trim();
+  return title ? title.slice(0, 48) : undefined;
 }
 
 function formatBytes(value: number): string {

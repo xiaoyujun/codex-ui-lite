@@ -2,9 +2,10 @@ import type {
   AuthLoginResponse,
   AuthStatus,
   CodexAttachment,
-  CodexTask,
+  CodexWindow,
   CreateProjectRequest,
   CreateCodexTaskRequest,
+  CreateCodexWindowRequest,
   Project,
   ProjectFileList,
   ProjectMarkdownFile,
@@ -125,25 +126,52 @@ export async function uploadCodexAttachment(
   });
 }
 
-export async function listCodexTasks(connection: Connection, projectId: string): Promise<CodexTask[]> {
-  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks`);
+export async function listCodexWindows(connection: Connection, projectId: string): Promise<CodexWindow[]> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/windows`);
 }
 
-export async function createCodexTask(
+export async function createCodexWindow(
   connection: Connection,
   projectId: string,
-  input: CreateCodexTaskRequest
-): Promise<CodexTask> {
-  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks`, {
+  input: CreateCodexWindowRequest = {}
+): Promise<CodexWindow> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/windows`, {
     method: "POST",
     body: JSON.stringify(input)
   });
 }
 
-export async function cancelCodexTask(connection: Connection, projectId: string, taskId: string): Promise<void> {
-  await request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/tasks/${encodeURIComponent(taskId)}`, {
+export async function closeCodexWindow(connection: Connection, projectId: string, windowId: string): Promise<void> {
+  await request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/windows/${encodeURIComponent(windowId)}`, {
     method: "DELETE"
   });
+}
+
+export async function createCodexTask(
+  connection: Connection,
+  projectId: string,
+  windowId: string,
+  input: CreateCodexTaskRequest
+): Promise<CodexWindow> {
+  return request(connection, `/api/projects/${encodeURIComponent(projectId)}/codex/windows/${encodeURIComponent(windowId)}/tasks`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function cancelCodexTask(
+  connection: Connection,
+  projectId: string,
+  windowId: string,
+  taskId: string
+): Promise<void> {
+  await request(
+    connection,
+    `/api/projects/${encodeURIComponent(projectId)}/codex/windows/${encodeURIComponent(windowId)}/tasks/${encodeURIComponent(taskId)}`,
+    {
+      method: "DELETE"
+    }
+  );
 }
 
 export function terminalUrl(connection: Connection, projectId: string, terminalId: string): string {
@@ -156,12 +184,12 @@ export function terminalUrl(connection: Connection, projectId: string, terminalI
   return url.toString();
 }
 
-export function codexTaskUrl(connection: Connection, projectId: string, taskId: string): string {
+export function codexWindowUrl(connection: Connection, projectId: string, windowId: string): string {
   const base = normalizeUrl(connection.serverUrl);
   const url = new URL("/ws/codex", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("projectId", projectId);
-  url.searchParams.set("taskId", taskId);
+  url.searchParams.set("windowId", windowId);
   url.searchParams.set("token", connection.token);
   return url.toString();
 }
