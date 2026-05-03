@@ -85,6 +85,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
     resizeObserver.observe(container);
 
     const dataDisposable = terminal.onData((data) => {
+      terminal.scrollToBottom();
       send({ type: "input", data });
     });
 
@@ -115,6 +116,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
         message = JSON.parse(raw) as TerminalServerMessage;
       } catch {
         terminal.writeln(raw);
+        terminal.scrollToBottom();
         return;
       }
 
@@ -127,12 +129,14 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
         flushTerminalWrite();
         terminal.writeln("");
         terminal.writeln(`[进程已退出 ${message.code ?? message.signal ?? ""}]`);
+        terminal.scrollToBottom();
         setStatus("已退出");
         setStatusKind("exited");
         onSessionUpdate();
       } else if (message.type === "error") {
         flushTerminalWrite();
         terminal.writeln(message.message);
+        terminal.scrollToBottom();
         setStatus("错误");
         setStatusKind("error");
       }
@@ -155,7 +159,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
       const data = outputQueueRef.current;
       outputQueueRef.current = "";
-      terminal.write(data);
+      terminal.write(data, () => terminal.scrollToBottom());
     }
 
     function scheduleFit() {
@@ -182,6 +186,8 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
             rows: nextSize.rows
           });
         }
+
+        terminal.scrollToBottom();
       } catch {
         // Fit can fail while the container is not yet visible.
       }
@@ -223,6 +229,7 @@ export function TerminalView({ connection, project, session, onSessionUpdate }: 
 
   function clearTerminal() {
     terminalRef.current?.clear();
+    terminalRef.current?.scrollToBottom();
     terminalRef.current?.focus();
   }
 
